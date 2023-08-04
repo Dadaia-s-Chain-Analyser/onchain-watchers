@@ -1,0 +1,9 @@
+pandas==1.4.1
+pymysql==1.0.2
+sqlalchemy==1.4.32
+python-dotenv==0.16.0
+sqlalchemy-utils==0.38.3
+eth-brownie==1.19.2
+web3==5.31.1
+kafka-python==2.0.2
+
