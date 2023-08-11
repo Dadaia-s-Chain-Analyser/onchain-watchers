@@ -6,4 +6,7 @@ sqlalchemy-utils==0.38.3
 eth-brownie==1.19.2
 web3==5.31.1
 kafka-python==2.0.2
-
+azure-storage-blob
+azure-data-tables
+azure-identity
+redis
