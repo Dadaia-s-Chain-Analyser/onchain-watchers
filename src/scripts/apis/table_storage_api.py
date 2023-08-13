@@ -47,8 +47,7 @@ class TableAPI:
 
     def update_entity(self, table, entity, mode='REPLACE'):
         table_client = self.table_service_client.get_table_client(table)
-        print(mode)
-        table_client.update_entity(entity=entity, mode=mode)
+        table_client.update_entity(entity=entity)
 
 
 if __name__ == '__main__':
