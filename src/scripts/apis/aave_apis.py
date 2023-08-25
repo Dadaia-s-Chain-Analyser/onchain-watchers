@@ -1,44 +1,76 @@
+from abc import ABC, abstractmethod
 from brownie import interface, network, config
 from scripts.apis.aave_datatypes import reserves_struct_v2, reserves_struct_v3
 
 
-def get_aave_pool(version):
-    active_config = config["networks"][network.show_active()]
-    if version == '2':
-        address = active_config['lendingPoolAddressProvider']
-        pool_addresses_provider = interface.IPoolAddressesProviderV2(address)
-        pool_address = pool_addresses_provider.getLendingPool()
-        lending_pool = interface.IPoolV2(pool_address)
-    else:
-        address = active_config['poolAdressesProvider']
-        pool_addresses_provider = interface.IPoolAddressesProviderV3(address)
-        pool_address = pool_addresses_provider.getPool()
-        lending_pool = interface.IPoolV3(pool_address)
-    return lending_pool
+class AaveAPI(ABC):
+
+    @abstractmethod
+    def get_aave_pool_contract(self):
+        raise NotImplementedError
+    
+    @abstractmethod
+    def get_price_oracle_contract(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_indexes_datatypes(self, list_type_tokens):
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_protocol_provider(self, **kwargs):
+        raise NotImplementedError
+
+class AaveV2API(AaveAPI):
+
+    def __init__(self, addresses_provider, network):
+        self.network = network
+        self.addresses_provider = interface.IPoolAddressesProviderV2(addresses_provider)
+
+    def get_aave_pool_contract(self):
+        pool_address = self.addresses_provider.getLendingPool()
+        return interface.IPoolV2(pool_address)
+    
+    def get_price_oracle_contract(self):
+        price_oracle_address = self.addresses_provider.getPriceOracle()
+        return interface.IAaveOracleV2(price_oracle_address)
+
+    def get_indexes_datatypes(self, list_type_tokens):
+        return {i: reserves_struct_v2.index(list(filter(lambda x: x["campo"] == i, reserves_struct_v2))[0]) for i in list_type_tokens}
+
+    def get_protocol_provider(self, **kwargs):
+        try: address = kwargs['protocol_data_provider']
+        except KeyError:
+            print("Protocol Data Provider não encontrado")
+            return
+        aave_protocol_provider = interface.IProtocolDataProvider(address)
+        return aave_protocol_provider
+    
+
+class AaveV3API(AaveAPI):
+
+    def __init__(self, addresses_provider, network):
+        self.network = network
+        self.addresses_provider = interface.IPoolAddressesProviderV3(addresses_provider)
+
+    def get_aave_pool_contract(self):
+        pool_address = self.addresses_provider.getPool()
+        return interface.IPoolV3(pool_address)
+    
+    def get_price_oracle_contract(self):
+        price_oracle_address = self.addresses_provider.getPriceOracle()
+        return interface.IAaveOracleV3(price_oracle_address)
+
+    def get_indexes_datatypes(self, list_type_tokens):
+        return {i: reserves_struct_v3.index(list(filter(lambda x: x["campo"] == i, reserves_struct_v3))[0]) for i in list_type_tokens}
+    
+
+    def get_protocol_provider(self, **kwargs):
+        aave_protocol_provider = interface.IProtocolDataProvider(self.addresses_provider.getProtocolDataProvider())
+        return aave_protocol_provider
 
 
-def get_price_oracle(version):
-    if version == '2':
-        address = config["networks"][network.show_active()]['lendingPoolAddressProvider']
-        pool_addresses_provider = interface.IPoolAddressesProviderV2(address)
-        price_oracle_address = pool_addresses_provider.getPriceOracle()
-        price_oracle = interface.IAaveOracleV2(price_oracle_address)
-    else:
-        address = config["networks"][network.show_active()]['poolAddressProvider']
-        pool_addresses_provider = interface.IPoolAddressesProviderV3(address)
-        price_oracle_address = pool_addresses_provider.getPriceOracle()
-        price_oracle = interface.IAaveOracleV3(price_oracle_address)
-    return price_oracle
+if __name__ == '__main__':
 
-
-
-def get_indexes_datatypes(version, list_type_tokens):
-    reserve = reserves_struct_v2 if version == '2' else reserves_struct_v3
-    return {i: reserve.index(list(filter(lambda x: x["campo"] == i, reserve))[0]) for i in list_type_tokens}
-
-
-
-def get_protocol_provider():
-    address = config["networks"][network.show_active()]['protocol_data_provider']
-    aave_protocol_provider = interface.IProtocolDataeProvider(address)
-    return aave_protocol_provider
+    aave_v2_address_provider = config["networks"][network.show_active()]['aave_v2_addresses_provider']
+    aave_v2_api = AaveV2API(addresses_provider=aave_v2_address_provider)

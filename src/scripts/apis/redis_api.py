@@ -16,6 +16,13 @@ class RedisAPI:
         if data is None:
             return []
         return json.loads(data)
+    
+   
+    def get_dict(self, key):
+        data = self.redis.get(key)
+        if data is None:
+            return {}
+        return json.loads(data)
 
 
     
