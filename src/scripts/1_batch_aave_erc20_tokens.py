@@ -5,15 +5,17 @@ from scripts.apis.table_storage_api import TableAPI
 from scripts.apis.redis_api import RedisAPI
 from scripts.apis.aave_apis import AaveV2API, AaveV3API
 from scripts.apis.erc20_apis import get_ERC20_metadata
+from scripts.apis.erc20_apis import ERC20API
 from azure.identity import DefaultAzureCredential
 from scripts.aave_interact import AaveInteract
 
 
 class AaveERC20Tokens(AaveInteract):
 
-    def __init__(self, network, version):
+    def __init__(self, network, version, erc20_api):
         self.network = network
         self.version = version
+        self.erc20_api = erc20_api
 
 
     def __schema_table(self, row):
@@ -28,7 +30,7 @@ class AaveERC20Tokens(AaveInteract):
 
     def __fulfill_azure_table(self, aave_tokens):
         for token in aave_tokens:
-            token_data = get_ERC20_metadata(token)
+            token_data = self.erc20_api(token)
             data = self.__schema_table(token_data)
             self.azure_table_client.insert_entity(self.azure_table_name, data)
 
@@ -55,8 +57,7 @@ def main(version):
     NETWORK = network.show_active()
     ENV_VARS = config["networks"][NETWORK]
     storage_account_name = os.environ.get("STORAGE_ACCOUNT_NAME", "storage_account_name") 
-    
-    aave_erc20_obj = AaveERC20Tokens(network=NETWORK, version=version)
+    aave_erc20_obj = AaveERC20Tokens(network=NETWORK, version=version, erc20_api=ERC20API())
     azure_table_client = TableAPI(storage_account_name, DefaultAzureCredential())
     redis_client = RedisAPI(host='redis', port=6379)
     azure_erc20_table = "aaveERC20Tokens"

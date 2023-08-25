@@ -5,18 +5,19 @@ from azure.identity import DefaultAzureCredential
 from scripts.apis.table_storage_api import TableAPI
 from scripts.apis.redis_api import RedisAPI
 from scripts.apis.aave_apis import AaveV2API, AaveV3API
-from scripts.apis.erc20_apis import get_ERC20_metadata
+from scripts.apis.erc20_apis import ERC20API
 from scripts.aave_interact import AaveInteract
 
 
 
 class AaveUtilityTokens(AaveInteract):
 
-    def __init__(self, network, version, aave_api):
+    def __init__(self, network, version, aave_api, erc20_api):
         self.network = network
+        self.version = version
         self.aave_api = aave_api
         self.aave_contract = aave_api.get_aave_pool_contract()
-        self.version = version
+        self.erc20_api = erc20_api
 
 
     def __schema_table(self, row, father_token):
@@ -50,7 +51,7 @@ class AaveUtilityTokens(AaveInteract):
         for dict_row in list_utility_tokens:
             for j in range(1, len(dict_row)):
                 token = (dict_row[0], dict_row[j])
-                token_data = get_ERC20_metadata(token[1])
+                token_data = self.erc20_api(token[1])
                 token_data = self.__schema_table(token_data, token[0])
                 yield token_data
 
@@ -120,7 +121,7 @@ def main(version):
     else:
         raise Exception("Versão inválida")
     
-    aave_utility_tokens = AaveUtilityTokens(NETWORK, version, aave_obj)
+    aave_utility_tokens = AaveUtilityTokens(NETWORK, version, aave_obj, erc20_api=ERC20API())
     aave_utility_tokens.configure_services(azure_table_client, aave_utility_table_name, redis_client, redis_utility_tokens_key)
 
     res = aave_utility_tokens.run(redis_erc20_tokens)
