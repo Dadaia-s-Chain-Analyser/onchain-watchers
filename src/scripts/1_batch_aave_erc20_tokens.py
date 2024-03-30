@@ -17,12 +17,12 @@ from scripts.dm_utilities.redis_client import RedisClient
 def get_azure_table(az_table_client, query):
   return [i for i in az_table_client.query_entities(query)]
 
-def format_erc20_data(row, network, version): 
+def format_erc20_data(row, symbol, addr, network, version): 
   return {
     "PartitionKey": f"{network}_aave_v{version}",
-    "RowKey": str(row["tokenAddress"]),
-    "name": row["name"],
-    "symbol": row["symbol"],
+    "RowKey": str(addr),
+    "name": row["name"] if row["name"] else symbol,
+    "symbol": symbol,
     "decimals": int(row["decimals"])
   }
 
@@ -72,13 +72,16 @@ def main(version):
     stored_missing_tokens = list(set(listed_tokens_addresses) - set(stored_aave_tokens))
     if len(stored_missing_tokens) > 0:
       for token in stored_missing_tokens:
+        symbol, address = list(filter(lambda x: x[1] == token, listed_tokens))[0]
         token_raw_data = erc20_actor.get_ERC20_metadata(token)  # 1 REQUEST TO BLOCKCHAIN NODE
-        token_data = format_erc20_data(token_raw_data, NETWORK, version)
+        token_data = format_erc20_data(token_raw_data, symbol, address, NETWORK, version)
+        print(f"INSERTING {token_data}")
         az_table_aave_tokens.upsert_entity(token_data)
       data_azure_table = get_azure_table(az_table_aave_tokens, query_aave_listed_tokens)
       print(f"Tabela {TABLE_AAVE_TOKENS} atualizada com sucesso")
     else: print(f"Tabela {TABLE_AAVE_TOKENS} está completa")
-    redis_client.insert_key_obj(redis_key, data_azure_table)
+    data_to_cache = list(map(lambda x: {"symbol": x["symbol"] , "RowKey": x["RowKey"]}, data_azure_table))
+    redis_client.insert_key_obj(redis_key, data_to_cache)
     print(f"Cache atualizado com sucesso")
   else:
     print(f"Cache está OK")
