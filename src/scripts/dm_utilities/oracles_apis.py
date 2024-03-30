@@ -11,5 +11,4 @@ def get_V3_aggregator(oracle_contract, asset_address):
         if str(e)[:3] == '429':
             sys.exit(13)
         print(e)
-
     return interface.AggregatorV3Interface(aggregator_address)

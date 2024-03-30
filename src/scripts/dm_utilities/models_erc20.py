@@ -1,13 +1,10 @@
 from brownie import interface
 
-
 class ERC20API:
 
-
     def __get_ERC20_contract(self, address):
-        erc20_contract = interface.IERC20(self.address)
+        erc20_contract = interface.IERC20(address)
         return erc20_contract
-
 
     def get_ERC20_metadata(self, token_address):
         ERC20_contract = self.__get_ERC20_contract(token_address)
@@ -27,7 +24,6 @@ class ERC20API:
     def get_total_supply(self):
         ERC20_contract = self.__get_ERC20_contract()
         return ERC20_contract.totalSupply()
-    
 
     def get_balance(self, address):
         ERC20_contract = self.__get_ERC20_contract()

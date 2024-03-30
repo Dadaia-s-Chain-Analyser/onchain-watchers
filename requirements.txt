@@ -9,4 +9,5 @@ kafka-python==2.0.2
 azure-storage-blob
 azure-data-tables
 azure-identity
+azure-keyvault-secrets
 redis

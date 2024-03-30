@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity >=0.5.0;
 
-import '@uniswap3/contracts/interfaces/pool/IUniswapV3PoolImmutables.sol';
-import '@uniswap3/contracts/interfaces/pool/IUniswapV3PoolState.sol';
-import '@uniswap3/contracts/interfaces/pool/IUniswapV3PoolDerivedState.sol';
-import '@uniswap3/contracts/interfaces/pool/IUniswapV3PoolActions.sol';
-import '@uniswap3/contracts/interfaces/pool/IUniswapV3PoolOwnerActions.sol';
-import '@uniswap3/contracts/interfaces/pool/IUniswapV3PoolEvents.sol';
+import '@uniswap_core_v3/contracts/interfaces/pool/IUniswapV3PoolImmutables.sol';
+import '@uniswap_core_v3/contracts/interfaces/pool/IUniswapV3PoolState.sol';
+import '@uniswap_core_v3/contracts/interfaces/pool/IUniswapV3PoolDerivedState.sol';
+import '@uniswap_core_v3/contracts/interfaces/pool/IUniswapV3PoolActions.sol';
+import '@uniswap_core_v3/contracts/interfaces/pool/IUniswapV3PoolOwnerActions.sol';
+import '@uniswap_core_v3/contracts/interfaces/pool/IUniswapV3PoolEvents.sol';
 
 /// @title The interface for a Uniswap V3 Pool
 /// @notice A Uniswap pool facilitates swapping and automated market making between any two assets that strictly conform

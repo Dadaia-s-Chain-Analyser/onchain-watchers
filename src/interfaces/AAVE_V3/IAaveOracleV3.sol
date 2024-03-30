@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0
 pragma solidity 0.8.10;
 
-import {IPriceOracleGetter} from '@aave3/contracts/interfaces/IPriceOracleGetter.sol';
-import {IPoolAddressesProvider} from '@aave3/contracts/interfaces/IPoolAddressesProvider.sol';
+import {IPriceOracleGetter} from '@aave_V3/contracts/interfaces/IPriceOracleGetter.sol';
+import {IPoolAddressesProvider} from '@aave_V3/contracts/interfaces/IPoolAddressesProvider.sol';
 
 /**
  * @title IAaveOracle

@@ -1,63 +1,68 @@
 from brownie import network
-import pandas as pd
-from requests import HTTPError
-from scripts.utils.utils import setup_database, get_kafka_producer, get_kafka_consumer
-from scripts.utils.interfaces import get_price_oracle
-import time, os, sys, json
-from datetime import datetime
+from scripts.apis.aave_apis import get_price_oracle
+from scripts.apis.redis_api import RedisAPI
+import os, json
+from scripts.apis.kafka_api import KafkaClient
+
+class AavePricesStreamer:
+
+    def __init__(self, redis_client, kafka_client, version):
+        self.redis_key = f"aave_tokens_{network.show_active()}_V{version}"
+        self.redis_client = redis_client
+        self.version = version
+        self.kafka_client = kafka_client
 
 
-def get_tokens(db_engine, version):
-    query = f"SELECT * FROM erc_20_tokens WHERE description = 'AAVE V{version}'"
-    df_assets = pd.read_sql(query, con=db_engine)
-    return df_assets
+    def get_tokens(self):
+        erc20_aave_tokens = self.redis_client.get_key(self.redis_key)
+        erc20_aave_tokens = list(map(lambda x: (x['RowKey'], x.get("symbol", x["RowKey"])), erc20_aave_tokens))
+        return erc20_aave_tokens
 
 
-def get_new_frame(oracle_contract, df_tokens_address, block_no):
-
-    list_token_addresses = list(df_tokens_address["tokenAddress"].values)
-    list_symbols = list(df_tokens_address["symbol"].values)
-    assets_new_prices = oracle_contract.getAssetsPrices(list_token_addresses)
-    res = [(list_symbols[i], assets_new_prices[i], block_no) for i in range(len(assets_new_prices))]
-    df = pd.DataFrame(res, columns=["token", "price", "block_no"])
-    return df
+    def get_token_prices(self, oracle_contract):
+        erc_tokens_list = self.get_tokens() 
+        erc20_aave_tokens = list(map(lambda x: x[0], erc_tokens_list))
+        assets_new_prices = oracle_contract.getAssetsPrices(erc20_aave_tokens)
+        token_prices = {erc_tokens_list[i][1]: assets_new_prices[i] for i in range(len(erc20_aave_tokens))}
+        return token_prices 
 
 
-def aggregator(df_aave_prices, df_price_cumulator):
-
-    df_price_cumulator = pd.concat([df_aave_prices, df_price_cumulator])
-    df_price_cumulator = df_price_cumulator.groupby(['token', 'price']).min()
-    df_price_cumulator.sort_values(by=['block_no', 'token'], inplace=True)
-    df_price_cumulator.reset_index(inplace=True)
-    return df_price_cumulator
-
-def send_to_kafka(producer, dataframe):
-    for row in dataframe.values:
-        dados = {dataframe.columns[i]: row[i] for i in range(len(dataframe.columns))}
-        producer.send(topic=os.environ['TOPIC_OUTPUT'], value=dados)
-
+    def my_function(self, oracle_contract, redis_output_key):
+        token_prices = self.get_token_prices(oracle_contract)
+        data = self.redis_client.get_dict(redis_output_key)
+        vect = []
+        for k, v in token_prices.items():
+            if data.get(k) != v:
+                row = {"token": k, "price": v}
+                vect.append(row)
+                data[k] = v
+        self.redis_client.register_key(redis_output_key, data)
+        yield vect
+     
 
 def main(version):
-    db_engine = setup_database()
-    producer = get_kafka_producer()
-    topic_blocks = f"{network.show_active()}_{os.environ['TOPIC_INPUT']}"
+
+    kafka_endpoint = os.environ['KAFKA_ENDPOINT']
     consumer_group = os.environ['CONSUMER_GROUP']
-    consumer_blocks = get_kafka_consumer(topic_blocks, group_id=consumer_group, auto_offset_reset='latest')
-    df_tokens_address = get_tokens(db_engine, version)
+
+    topic_blocks = f"{network.show_active()}_{os.environ['TOPIC_INPUT']}"
+    topic_aave_prices = f"{network.show_active()}_{os.environ['TOPIC_OUTPUT']}"
+
+    redis_client = RedisAPI(host='redis', port=6379)
+    redis_key = "cache_daqui2"
+    kafka_client = KafkaClient(connection_str=kafka_endpoint)
+
+    aave_price_streamer = AavePricesStreamer(redis_client, kafka_client, version)
+    kafka_client.create_idempotent_topic(topic=topic_aave_prices)
+
+    producer = kafka_client.create_producer()
+    consumer = kafka_client.create_consumer(topic=topic_blocks, consumer_group=consumer_group)
+
+    aave_price_streamer.get_tokens()
     oracle_contract = get_price_oracle(version)
-    df_price_cumulator = pd.DataFrame([], columns=["token", "price", "block_no"])
-    offset_counter = 0
-    for msg in consumer_blocks:
-        block_number = json.loads(msg.value)['number']
-        df_aave_prices = get_new_frame(oracle_contract, df_tokens_address, block_number)
-        df_price_cumulator = aggregator(df_aave_prices, df_price_cumulator)
-        num_2 = df_price_cumulator.shape[0]
-        if num_2 > offset_counter:
-            diff = num_2 - offset_counter
-            new_part = df_price_cumulator.tail(diff)
-            send_to_kafka(producer, new_part)
-            offset_counter = num_2
-        offset_counter += 1
-
-
-
+    for msg in consumer:
+        for data in aave_price_streamer.my_function(oracle_contract, redis_key):
+            if len(data) > 0:
+                for token_price in data:
+                    producer.send(topic=topic_aave_prices, value=token_price)
+     

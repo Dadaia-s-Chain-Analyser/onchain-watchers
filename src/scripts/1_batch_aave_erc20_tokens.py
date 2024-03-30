@@ -1,80 +1,84 @@
-import os, logging
-from brownie import network, config
-from dotenv import load_dotenv
-from scripts.apis.table_storage_api import TableAPI
-from scripts.apis.redis_api import RedisAPI
-from scripts.apis.aave_apis import AaveV2API, AaveV3API
-from scripts.apis.erc20_apis import get_ERC20_metadata
-from scripts.apis.erc20_apis import ERC20API
+import os
+import sys
+
+from brownie import network
 from azure.identity import DefaultAzureCredential
-from scripts.aave_interact import AaveInteract
+from azure.data.tables import TableServiceClient
+from azure.keyvault.secrets import SecretClient
+
+from scripts.dm_utilities.models_aave_v2 import AaveV2DataProvider
+from scripts.dm_utilities.models_aave_v3 import AaveV3DataProvider
+
+from scripts.dm_utilities.models_erc20 import ERC20API
+from scripts.dm_utilities.redis_client import RedisClient
 
 
-class AaveERC20Tokens(AaveInteract):
 
-    def __init__(self, network, version, erc20_api):
-        self.network = network
-        self.version = version
-        self.erc20_api = erc20_api
+def get_azure_table(az_table_client, query):
+  return [i for i in az_table_client.query_entities(query)]
 
-
-    def __schema_table(self, row):
-        return {
-            "PartitionKey": f"{network.show_active()}_aave_v{self.version}", 
-            "RowKey": str(row["tokenAddress"]),
-            "name": row["name"],
-            "symbol": row["symbol"],
-            "decimals": int(row["decimals"])
-        }
-
-
-    def __fulfill_azure_table(self, aave_tokens):
-        for token in aave_tokens:
-            token_data = self.erc20_api(token)
-            data = self.__schema_table(token_data)
-            self.azure_table_client.insert_entity(self.azure_table_name, data)
-
-    
-    def get_metadata_erc20_tokens(self, aave_tokens):
-        table_data_redis = self.redis_client.get_key(self.redis_cached_table)
-        redis_missing_tokens = self._get_diff_tokens(table_data_redis, aave_tokens)
-        if len(redis_missing_tokens) > 0:
-            data_azure_table = self._get_azure_table_data()
-            azure_missing_tokens = self._get_diff_tokens(data_azure_table, redis_missing_tokens)
-            if azure_missing_tokens == []:
-                self.get_from_azure_and_cache()
-                return f"Tabela Azure completa e cache atualizado"
-            else:
-                self.__fulfill_azure_table(azure_missing_tokens)
-                self.get_from_azure_and_cache()
-                return f"Tabela azure preenchida e cache atualizado"
-        return f"Tabela Azure cacheada"
-
+def format_erc20_data(row, network, version): 
+  return {
+    "PartitionKey": f"{network}_aave_v{version}",
+    "RowKey": str(row["tokenAddress"]),
+    "name": row["name"],
+    "symbol": row["symbol"],
+    "decimals": int(row["decimals"])
+  }
 
 
 def main(version):
-    load_dotenv()
-    NETWORK = network.show_active()
-    ENV_VARS = config["networks"][NETWORK]
-    storage_account_name = os.environ.get("STORAGE_ACCOUNT_NAME", "storage_account_name") 
-    aave_erc20_obj = AaveERC20Tokens(network=NETWORK, version=version, erc20_api=ERC20API())
-    azure_table_client = TableAPI(storage_account_name, DefaultAzureCredential())
-    redis_client = RedisAPI(host='redis', port=6379)
-    azure_erc20_table = "aaveERC20Tokens"
-    redis_erc20_key = f"aave_tokens_{NETWORK}_V{version}"
-    aave_erc20_obj.configure_services(azure_table_client, azure_erc20_table, redis_client, redis_erc20_key)
 
-    if version == '2':
-        aave_contract_addresses_provider = ENV_VARS['aave_v2_addresses_provider']
-        aave_v2_obj = AaveV2API(addresses_provider=aave_contract_addresses_provider, network=NETWORK)
-        aave_contract = aave_v2_obj.get_aave_pool_contract()
-    elif version == '3':
-        aave_contract_addresses_provider = ENV_VARS['aave_v3_addresses_provider']
-        aave_v3_obj = AaveV3API(addresses_provider=aave_contract_addresses_provider, network=NETWORK)
-        aave_contract = aave_v3_obj.get_aave_pool_contract()
-    else:
-        raise Exception("Versão inválida")
+  NETWORK = network.show_active()
+  TABLE_ADDR_PROV = "CoreSmartContracts"
+  TABLE_AAVE_TOKENS = "AaveERC20Tokens"
 
-    aave_erc20_tokens = aave_contract.getReservesList()
-    res = aave_erc20_obj.get_metadata_erc20_tokens(aave_erc20_tokens)
-    print(res)
+  AKV_URL = f'https://{os.getenv("KEY_VAULT_NODE_NAME")}.vault.azure.net/'
+  AZ_TBLS_URL = f'https://{os.getenv("STORAGE_ACCOUNT_NAME")}.table.core.windows.net/'
+  REDIS_SERVER = dict(host="redis", port=6379)
+  AZURE_CREDENTIAL = DefaultAzureCredential()
+
+  # Instancia serviços Key Vault para API KEY, Azure Tables e Redis para dados de tokens listados na Aave
+  akv_client = SecretClient(vault_url=AKV_URL, credential=AZURE_CREDENTIAL)
+  az_tables_client = TableServiceClient(endpoint=AZ_TBLS_URL, credential=AZURE_CREDENTIAL)
+  redis_client = RedisClient(**REDIS_SERVER)
+  erc20_actor = ERC20API()
+
+  redis_key = f"aave_tokens_{NETWORK}_V{version}" #  Chave do Redis. Ex: aave_tokens_goerli_V2, aave_tokens_mainnet_V3, ...
+
+  az_table_providers = az_tables_client.get_table_client(TABLE_ADDR_PROV)
+  az_table_aave_tokens = az_tables_client.get_table_client(TABLE_AAVE_TOKENS)
+
+  az_table_providers_data = get_azure_table(az_table_providers, f"PartitionKey eq '{NETWORK}' and RowKey eq 'aave'")[0]
+  aave_data_provider =  az_table_providers_data[f"aave_v{version}_data_provider"]
+
+  AaveDataProvider = getattr(sys.modules[__name__], f"AaveV{version}DataProvider")
+  aave_data_provider_actor = AaveDataProvider(data_provider_addr=aave_data_provider, network=NETWORK)
+
+  # DEFINIÇÃO DE ALGUMAS LAMBDAS
+  az_table_aave_tokens = az_tables_client.get_table_client(TABLE_AAVE_TOKENS)
+  query_aave_listed_tokens = f"PartitionKey eq '{NETWORK}_aave_v{version}'"
+
+  cached_listed_tokens = redis_client.get_key_obj(redis_key)
+  cached_listed_tokens = map(lambda x: x["RowKey"], cached_listed_tokens)
+
+  listed_tokens = aave_data_provider_actor.get_all_reserve_tokens()
+  listed_tokens_addresses = list(map(lambda x: x[1], listed_tokens))
+
+  cached_missing_listed_tokens = list(set(listed_tokens_addresses) - set(cached_listed_tokens))
+  if len(cached_missing_listed_tokens) > 0:
+    data_azure_table = get_azure_table(az_table_aave_tokens, query_aave_listed_tokens)
+    stored_aave_tokens = map(lambda x: x["RowKey"], data_azure_table)
+    stored_missing_tokens = list(set(listed_tokens_addresses) - set(stored_aave_tokens))
+    if len(stored_missing_tokens) > 0:
+      for token in stored_missing_tokens:
+        token_raw_data = erc20_actor.get_ERC20_metadata(token)  # 1 REQUEST TO BLOCKCHAIN NODE
+        token_data = format_erc20_data(token_raw_data, NETWORK, version)
+        az_table_aave_tokens.upsert_entity(token_data)
+      data_azure_table = get_azure_table(az_table_aave_tokens, query_aave_listed_tokens)
+      print(f"Tabela {TABLE_AAVE_TOKENS} atualizada com sucesso")
+    else: print(f"Tabela {TABLE_AAVE_TOKENS} está completa")
+    redis_client.insert_key_obj(redis_key, data_azure_table)
+    print(f"Cache atualizado com sucesso")
+  else:
+    print(f"Cache está OK")

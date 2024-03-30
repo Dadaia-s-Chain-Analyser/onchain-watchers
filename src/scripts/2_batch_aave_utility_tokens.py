@@ -1,129 +1,86 @@
+from functools import reduce
 import logging
-from dotenv import load_dotenv
-from brownie import config, network
+import os
+import sys
+
+from brownie import network
 from azure.identity import DefaultAzureCredential
-from scripts.apis.table_storage_api import TableAPI
-from scripts.apis.redis_api import RedisAPI
-from scripts.apis.aave_apis import AaveV2API, AaveV3API
-from scripts.apis.erc20_apis import ERC20API
-from scripts.aave_interact import AaveInteract
+from azure.data.tables import TableServiceClient
+from azure.keyvault.secrets import SecretClient
+
+from scripts.dm_utilities.models_aave_v2 import AaveV2DataProvider
+from scripts.dm_utilities.models_aave_v3 import AaveV3DataProvider
+from scripts.dm_utilities.models_erc20 import ERC20API
+
+from scripts.dm_utilities.redis_client import RedisClient
 
 
-
-class AaveUtilityTokens(AaveInteract):
-
-    def __init__(self, network, version, aave_api, erc20_api):
-        self.network = network
-        self.version = version
-        self.aave_api = aave_api
-        self.aave_contract = aave_api.get_aave_pool_contract()
-        self.erc20_api = erc20_api
+def get_azure_table(az_table_client, query):
+  return [i for i in az_table_client.query_entities(query)]
 
 
-    def __schema_table(self, row, father_token):
-        return {
-            "PartitionKey": f"{self.network}_aave_v{self.version}",
-            "RowKey": str(row["tokenAddress"]),
-            "FatherToken": str(father_token),
-            "version": f"v{self.version}",
-            "name": row["name"],
-            "symbol": row["symbol"],
-            "decimals": int(row["decimals"])
-        }
-
-
-    def get_reserve_tokens(self, token):
-        list_type_tokens = ["aTokenAddress", "stableDebtTokenAddress", "variableDebtTokenAddress"]
-        utility_tokens_indexes = self.aave_api.get_indexes_datatypes(list_type_tokens)
-        tokens = [self.aave_contract.getReserveData(token)[utility_tokens_indexes[type_token]] for type_token in list_type_tokens]
-        return {"tokenAddress": token, **{list_type_tokens[i]: tokens[i] for i in range(len(tokens))}}
-    
-
-    def __get_list_utility_tokens(self, data_erc20_tokens):
-        list_erc20_tokens = list(map(lambda x: x["RowKey"], data_erc20_tokens))
-        reserve_tokens = [self.get_reserve_tokens(token) for token in list_erc20_tokens]
-        get_utility_tokens = lambda x: (x['tokenAddress'], x["aTokenAddress"], x["stableDebtTokenAddress"], x["variableDebtTokenAddress"])
-        list_utility_tokens = list(map(get_utility_tokens, reserve_tokens))
-        return list_utility_tokens
-
-
-    def __get_metadata_utility_tokens(self, list_utility_tokens):
-        for dict_row in list_utility_tokens:
-            for j in range(1, len(dict_row)):
-                token = (dict_row[0], dict_row[j])
-                token_data = self.erc20_api(token[1])
-                token_data = self.__schema_table(token_data, token[0])
-                yield token_data
-
-
-    def __fulfill_azure_table(self, list_utility_tokens):
-        for token_data in self.__get_metadata_utility_tokens(list_utility_tokens):
-            self.azure_table_client.insert_entity(self.azure_table_name, token_data)
-          
-
-
-    def get_from_azure_and_cache(self):
-        data_azure_table = self._get_azure_table_data()
-        self.redis_client.register_key(self.redis_cached_table, data_azure_table)
-
-
-    def cache_aave_utility_tokens(self, redis_utility_tokens, aave_utility_tokens_data):
-        aave_utility_tokens = [(token[0], i) for token in aave_utility_tokens_data for i in token[1:]]
-        utility_tokens = [j for i, j in aave_utility_tokens]
-        redis_missing_tokens = self._get_diff_tokens(redis_utility_tokens, utility_tokens)
-        if len(redis_missing_tokens) > 0:
-            data_azure_table = self._get_azure_table_data()
-            azure_missing_tokens = self._get_diff_tokens(data_azure_table, utility_tokens)
-            if len(azure_missing_tokens) == 0:
-                self.get_from_azure_and_cache()
-                return f"Tabela Azure completa e cache atualizado"
-            else:
-                aave_utility_tokens = list(filter(lambda x: x[1] in azure_missing_tokens, aave_utility_tokens))
-                self.__fulfill_azure_table(aave_utility_tokens)
-                self.get_from_azure_and_cache()
-                return f"Tabela azure preenchida e cache atualizado"
-        return f"Tabela Azure cacheada"    
-
-
-    def run(self, redis_erc20_tokens):
-        redis_utility_tokens = self.redis_client.get_key(self.redis_cached_table)
-        aave_utility_tokens_data = self.__get_list_utility_tokens(redis_erc20_tokens)
-        get_and_cache = self.cache_aave_utility_tokens(redis_utility_tokens, aave_utility_tokens_data)
-        return get_and_cache
+def format_erc20_data(row, father_token, network, version):
+  return {
+    "PartitionKey": f"{network}_aave_v{version}",
+    "RowKey": str(row["tokenAddress"]),
+    "FatherToken": str(father_token),
+    "version": f"v{version}",
+    "name": row["name"],
+    "symbol": row["symbol"],
+    "decimals": int(row["decimals"])
+  }
 
 def main(version):
 
-    load_dotenv()
-    NETWORK = network.show_active()
-    ENV_VARS = config["networks"][NETWORK]
+  NETWORK = network.show_active()
+  TABLE_ADDR_PROV = "CoreSmartContracts"
+  TABLE_AAVE_TOKENS = "AaveERC20Tokens"
+  TABLE_AAVE_UTILITY_TOKENS = "aaveUtilityTokens"
+  
+  AZ_TBLS_URL = f'https://{os.getenv("STORAGE_ACCOUNT_NAME")}.table.core.windows.net/'
+  REDIS_SERVER = dict(host="redis", port=6379)
+  AZURE_CREDENTIAL = DefaultAzureCredential()
 
-    storage_account_name = "dadaiastorage"
-    aave_utility_table_name = "aaveUtilityTokens"
+  az_tables_client = TableServiceClient(endpoint=AZ_TBLS_URL, credential=AZURE_CREDENTIAL)
+  redis_client = RedisClient(**REDIS_SERVER)
+  erc20_actor = ERC20API()
 
-    azure_table_client = TableAPI(storage_account_name, DefaultAzureCredential())
-    redis_client = RedisAPI(host='redis', port=6379)
-    redis_erc20_tokens_key = f"aave_tokens_{NETWORK}_V{version}"
-    redis_erc20_tokens = redis_client.get_key(redis_erc20_tokens_key)
-    if len(redis_erc20_tokens) == 0: 
-        logging.info(f"Chave {redis_erc20_tokens_key} está vazia!")
-        return
-    
-    redis_utility_tokens_key = f"aave_utility_{NETWORK}_V{version}"
+  redis_utility_tokens_key = f"aave_utility_tokens_{NETWORK}_V{version}"
 
-    if version == '2':
-        aave_contract_addresses_provider = ENV_VARS['aave_v2_addresses_provider']
-        aave_obj = AaveV2API(addresses_provider=aave_contract_addresses_provider, network=NETWORK)
+  az_table_providers = az_tables_client.get_table_client(TABLE_ADDR_PROV)
+  az_table_aave_utility_tokens = az_tables_client.get_table_client(TABLE_AAVE_UTILITY_TOKENS)
+  az_table_providers_data = get_azure_table(az_table_providers, f"PartitionKey eq '{NETWORK}' and RowKey eq 'aave'")[0]
+  aave_data_provider =  az_table_providers_data[f"aave_v{version}_data_provider"] 
+  AaveDataProvider = getattr(sys.modules[__name__], f"AaveV{version}DataProvider")
+  aave_data_provider_actor = AaveDataProvider(data_provider_addr=aave_data_provider, network=NETWORK)
 
-    elif version == '3':
-        aave_contract_addresses_provider = ENV_VARS['aave_v3_addresses_provider']
-        aave_obj = AaveV3API(addresses_provider=aave_contract_addresses_provider, network=NETWORK)
-       
+  reserve_tokens = aave_data_provider_actor.get_all_reserve_tokens()
+  reserve_tokens = list(map(lambda x: x[1], reserve_tokens))
+  
+  query_aave_utility_tokens = f"PartitionKey eq '{NETWORK}_aave_v{version}'"
+  redis_utility_tokens_key = f"aave_utility_tokens_{NETWORK}_V{version}" # Chave Redis para cache dos tokens ERC20
+  cached_utility_tokens = redis_client.get_key_obj(redis_utility_tokens_key)
+
+  if len(cached_utility_tokens) == 0:
+
+    data_azure_table = get_azure_table(az_table_aave_utility_tokens, query_aave_utility_tokens)
+    stored_utility_tokens = map(lambda x: x["RowKey"], data_azure_table)
+    listed_utility_tokens = list(map(lambda token: (token, aave_data_provider_actor.get_reserve_token_addresses(token)), reserve_tokens))
+    utility_tokens = reduce(lambda a, b: a + b, [list(i[1]) for i in listed_utility_tokens]) if len(listed_utility_tokens) > 0 else []
+  
+    missing_utility_tokens = list(set(utility_tokens) - set(stored_utility_tokens))
+    if len(missing_utility_tokens) > 0:
+      print(f"MISSING STORED utility tokens: {missing_utility_tokens}")
+      for token in missing_utility_tokens:
+        token_raw_data = erc20_actor.get_ERC20_metadata(token)  # 1 REQUEST TO BLOCKCHAIN NODE
+        father_token = list(filter(lambda x: token in x[1], listed_utility_tokens))[0][0]
+        utility_token_data = format_erc20_data(token_raw_data, father_token, NETWORK, version)
+        az_table_aave_utility_tokens.upsert_entity(utility_token_data)
+        data_azure_table = get_azure_table(az_table_aave_utility_tokens, query_aave_utility_tokens)
+      print(f"Tabela {TABLE_AAVE_UTILITY_TOKENS} atualizada com sucesso")
     else:
-        raise Exception("Versão inválida")
-    
-    aave_utility_tokens = AaveUtilityTokens(NETWORK, version, aave_obj, erc20_api=ERC20API())
-    aave_utility_tokens.configure_services(azure_table_client, aave_utility_table_name, redis_client, redis_utility_tokens_key)
-
-    res = aave_utility_tokens.run(redis_erc20_tokens)
-    print(res)
-    
+      print(f"Tabela {TABLE_AAVE_UTILITY_TOKENS} está completa")
+    data_to_cache = list(map(lambda x: (x["RowKey"], x["FatherToken"], x["symbol"]), data_azure_table))
+    redis_client.insert_key_obj(redis_utility_tokens_key, data_to_cache)
+  else:
+    print(f"Chave redis_utility_tokens_key está completa")
