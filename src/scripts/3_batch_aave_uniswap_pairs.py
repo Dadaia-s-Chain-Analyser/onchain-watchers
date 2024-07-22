@@ -1,101 +1,169 @@
+import logging
 import os
-import redis
-from brownie import network, config
+
+
+from brownie import network
+from itertools import combinations
+
 from azure.identity import DefaultAzureCredential
 from azure.data.tables import TableServiceClient
 from azure.keyvault.secrets import SecretClient
 
-from scripts.dm_utilities.models_aave import AaveV2API, AaveV3API
-from scripts.dm_utilities.models_erc20 import ERC20API
+from scripts.dm_utilities.models_uniswap import UniswapFactory
+from scripts.dm_utilities.redis_client import RedisClient
 
 
-class AaveERC20Tokens:
-
-  def __init__(self, redis_client, azure_table_client, azure_table_name, version):
-    self.redis_client = redis_client
-    self.azure_table_client = azure_table_client
-    self.azure_table_name = azure_table_name
-    self.version = version
-    self.redis_cached_table = f"aave_tokens_{network.show_active()}_V{version}"
+import pandas as pd
 
 
-  def __schema_table(self, row):
-    return {
-      "PartitionKey": network.show_active(), 
-      "RowKey": str(row["tokenAddress"]), 
-      "version": f"{self.version}",
-      "name": row["name"],
-      "symbol": row["symbol"],
-      "decimals": int(row["decimals"])
-    }
-    
 
-  def __get_azure_table_data(self):
-    query = f"PartitionKey eq '{network.show_active()}' and version eq '{self.version}'"
-    return self.azure_table_client.query_table(self.azure_table_name, query=query)
+NULL_ADDRESS = '0x0000000000000000000000000000000000000000'
 
+# class UniswapV2PairPools:
 
-  def __fulfill_azure_table(self, aave_tokens):
-    for token in aave_tokens:
-      token_data = get_ERC20_metadata(token)
-      data = self.__schema_table(token_data)
-      self.azure_table_client.insert_entity(self.azure_table_name, data)
+#   def __init__(self, uniswap_version, redis_client, azure_table_client, azure_table_name):
+#     self.version = uniswap_version
+#     self.redis_client = redis_client
+#     self.azure_table_client = azure_table_client
+#     self.azure_table_name = azure_table_name
+#     self.uniswap_factory = get_uniswap_factory(uniswap_version)
+  
+
+#   def get_pair_pure_combinations(self, tokens):
+#     list_pool_pairs =list(combinations(tokens, 2))
+#     return [tuple(sorted(i)) for i in list_pool_pairs]
 
 
-  def __get_diff_tokens(self, stored_data, aave_tokens):
-    stored_aave_tokens = map(lambda x: x["RowKey"], stored_data)
-    diff_tokens = list(set(aave_tokens) - set(stored_aave_tokens))
-    return diff_tokens
-    
+#   def get_metadata_pools(self, token_pairs):
+#     list_pool_addresses = [(self.uniswap_factory.getPair(tokenA, tokenB), tokenA, tokenB) for tokenA, tokenB in token_pairs]
+#     uniswap_pair_pool_cols = ['pool_address', 'address_token_a', 'address_token_b']
+#     df = pd.DataFrame(list_pool_addresses ,columns=uniswap_pair_pool_cols)
+#     return df
 
-  def __get_aave_reserve_tokens(self):
-    link_token = config["networks"][network.show_active()]["link_token"]
-    weth_token = config["networks"][network.show_active()]["weth_token"]
-    uni_token = config["networks"][network.show_active()]["uni_token"]
-    tokens = [link_token, weth_token, uni_token]
-    return tokens
-    
 
-  def get_metadata_erc20_tokens(self):
-    table_data_redis = self.redis_client.get_key(self.redis_cached_table)
-    aave_tokens = self.__get_aave_reserve_tokens()
-    redis_missing_tokens = self.__get_diff_tokens(table_data_redis, aave_tokens)
-    if len(redis_missing_tokens) > 0:
-      data_azure_table = self.__get_azure_table_data()
-      azure_missing_tokens = self.__get_diff_tokens(data_azure_table, redis_missing_tokens)
-      if azure_missing_tokens == []:
-        self.redis_client.register_key(self.redis_cached_table, data_azure_table)
-        return f"Tabela Azure completa e cache atualizado"
-      else:
-        self.__fulfill_azure_table(azure_missing_tokens)
-        table_data_azure = self.__get_azure_table_data()
-        self.redis_client.register_key(self.redis_cached_table, table_data_azure)
-        return f"Tabela azure preenchida e cache atualizado"
-    return f"Tabela Azure cacheada"
 
+
+def get_azure_table(az_table_client, query):
+  return [i for i in az_table_client.query_entities(query)]
+
+
+def format_erc20_data(row, network, version): 
+  return {
+    "PartitionKey": f"{network}_uniswap_v{version}",
+    "RowKey": row["pair_name"],
+    "token_a": str(row["token_a"]),
+    "token_b": str(row["token_b"]),
+    "symbol_a": row["symbol_a"],
+    "symbol_b": row["symbol_b"],
+    "pair_pool_address": str(row["pair_pool_address"])
+  }
+
+def get_pair_pure_combinations(tokens):
+  tokens = list(map(lambda x: x["RowKey"], tokens))
+  print(tokens)
+  list_pool_pairs =list(combinations(tokens, 2))
+  list_pair_pure_combinations = list(map(lambda x: {"token_b": x[0], "token_a": x[1]}, list_pool_pairs))
+  return pd.DataFrame(list_pair_pure_combinations)
+  
+
+def get_df_pair_pure_combinations(tokens):
+    print(tokens)
+    #tokens = list(map(lambda x: x["RowKey"], tokens))
+    df_tokens = pd.DataFrame(tokens)
+    df_pairs = get_pair_pure_combinations(tokens)
+    df_pairs["symbol_a"] = df_pairs.merge(df_tokens, left_on="token_a", right_on="RowKey", how="left")["symbol"]
+    df_pairs["symbol_b"] = df_pairs.merge(df_tokens, left_on="token_b", right_on="RowKey", how="left")["symbol"]
+    df_pairs["pair_name"] = df_pairs["symbol_a"] + "-" + df_pairs["symbol_b"]
+    return df_pairs
+
+8553.209665995958522073
+12141640
 
 def main(version):
-
-  NETWORK = network.show_active()
-  KEY_VAULT = os.getenv("KEY_VAULT_NODE_NAME", "key_vault_name")
-  STORAGE_ACCOUNT = os.getenv("STORAGE_ACCOUNT_NAME", "storage_account_name")
-  TABLE_PERIPHERAL_CONTRACTS = "PeripheralSmartContracts"
-  AZURE_CREDENTIAL = DefaultAzureCredential()
-  REDIS_SERVER = {"host": "redis", "port": 6379}
     
-  AKV_ENDPOINT = f"https://{KEY_VAULT}.vault.azure.net/"
-  AZ_TABLES_ENDPOINT = f'https://{STORAGE_ACCOUNT}.table.core.windows.net/'
-  TABLE_ADDRESSES_PROV = "CoreSmartContracts"
+  NETWORK = network.show_active()
+  TABLE_UNISWAP_POOLS = "AaveUniswapPairPools"
+  TABLE_ADDR_PROV = "CoreSmartContracts"
+  AKV_URL = f'https://{os.getenv("KEY_VAULT_NODE_NAME")}.vault.azure.net/'
+  AZ_TBLS_URL = f'https://{os.getenv("STORAGE_ACCOUNT_NAME")}.table.core.windows.net/'
+  REDIS_SERVER = dict(host="redis", port=6379)
+  AZURE_CREDENTIAL = DefaultAzureCredential()
+
+  az_tables_client = TableServiceClient(endpoint=AZ_TBLS_URL, credential=AZURE_CREDENTIAL)
+  az_table_providers = az_tables_client.get_table_client(TABLE_ADDR_PROV)
+  az_table_uniswap_pools = az_tables_client.get_table_client(TABLE_UNISWAP_POOLS)
+  
+  az_table_providers_data = get_azure_table(az_table_providers, f"PartitionKey eq '{NETWORK}' and RowKey eq 'uniswap'")[0]
+  uniswap_factory_addr =  az_table_providers_data[f"uniswap_v{version}_factory"]
+  print(uniswap_factory_addr)
+
+  aave_erc20_key = f"aave_tokens_{NETWORK}_V{version}"
+  aave_erc20_pairs_key = f"aave_tokens_uniswap_pairs{NETWORK}_V{version}"
+  redis_client = RedisClient(**REDIS_SERVER)
+
+  cached_erc20_tokens = redis_client.get_key_obj(aave_erc20_key)
+  
+  df_pairs = get_df_pair_pure_combinations(cached_erc20_tokens)
+
+  print(df_pairs)
+  uniswap_factory = UniswapFactory(uniswap_factory_addr, NETWORK, version)
+
+  cached_uniswap_pair_pools = redis_client.get_key_obj(aave_erc20_pairs_key)
+  cached_uniswap_pair_pools = list(map(lambda x: x["RowKey"], cached_uniswap_pair_pools))
+
+  if len(cached_uniswap_pair_pools) != len(cached_erc20_tokens):
+    data_azure_table = get_azure_table(az_table_uniswap_pools, f"PartitionKey eq '{NETWORK}_uniswap_v{version}'")
+    stored_uniswap_pair_pools = list(map(lambda x: x["RowKey"], data_azure_table))
+
+    
+    dict_pairs = df_pairs.to_dict(orient='records')
+    uniswap_pair_pools = map(lambda x: x["pair_name"], dict_pairs)
+    stored_missing_uniswap_pair_pools = list(set(uniswap_pair_pools) - set(stored_uniswap_pair_pools))
+    print(stored_missing_uniswap_pair_pools)
+    if len(stored_missing_uniswap_pair_pools) > 0:
+      for pair in stored_missing_uniswap_pair_pools:
+        row = df_pairs[df_pairs["pair_name"] == pair].iloc[0]
+        row = row.to_dict()
+        row["pair_pool_address"] = uniswap_factory.get_uniswap_pair(row["token_a"], row["token_b"])
+        data_azure_table = format_erc20_data(row, NETWORK, version)
+        az_table_uniswap_pools.upsert_entity(data_azure_table)
+      print(f"Tabela {TABLE_UNISWAP_POOLS} atualizada com sucesso")
+      data_azure_table = get_azure_table(az_table_uniswap_pools, f"PartitionKey eq '{NETWORK}_uniswap_v{version}'")
+    else: print(f"Tabela {TABLE_UNISWAP_POOLS} está completa")
+    data_to_cache = list(map(lambda x: {"RowKey": x["pair_name"], "token_a": x["token_a"], "token_b": x["token_b"]}, dict_pairs))
+    redis_client.insert_key_obj(aave_erc20_pairs_key, data_to_cache)
+    print(f"Cache atualizado com sucesso")
+  else:
+    print(f"Cache já atualizado")
+
+    # for token in stored_missing_tokens:
+    #   symbol, address = list(filter(lambda x: x[1] == token, listed_tokens))[0]
+    #   data_azure_table = format_erc20_data(erc20_data, symbol, address, NETWORK, version)
+    #   az_table_aave_tokens.upsert_entity(data_azure_table)
+    #   redis_client.set_key_obj(redis_key, data_azure_table)
+    #   logging.info(f"Token {symbol} address {address} inserted in Azure Table {TABLE_AAVE_TOKENS}")
+  # df_pairs["symbol_a"] = df_pairs.merge(df_tokens, left_on="token_a", right_on="RowKey", how="left")["symbol"]
+  # df_pairs["symbol_b"] = df_pairs.merge(df_tokens, left_on="token_b", right_on="RowKey", how="left")["symbol"]
+  # df_pairs["pair_name"] = df_pairs["symbol_a"] + "-" + df_pairs["symbol_b"]
+  # df_pairs["pair_pool_address"] = df_pairs.apply(lambda x: uniswap_factory.get_uniswap_pair(x["token_a"], x["token_b"]), axis=1)
+
+  # print(df_pairs[df_pairs["pair_pool_address"] != NULL_ADDRESS])
 
 
-  erc20_table_name = "aaveERC20Tokens"
-  akv_client = SecretClient(vault_url=AKV_ENDPOINT, credential=AZURE_CREDENTIAL)
-  redis_client = redis.Redis(**REDIS_SERVER)
-
-  az_tables_client = TableServiceClient(endpoint=AZ_TABLES_ENDPOINT, credential=AZURE_CREDENTIAL)
-  az_table_providers = az_tables_client.get_table_client(TABLE_ADDRESSES_PROV)
-
-  aave_erc20_obj = AaveERC20Tokens(redis_client, az_table_providers, erc20_table_name, version)
-  #azure_table_client.create_table(erc20_table_name)
-  res = aave_erc20_obj.get_metadata_erc20_tokens()
-  print(res)
+  # erc_20_tokens_data = uniswap_obj.get_erc20_tokens()
+  # df_erc20_tokens = pd.DataFrame(erc_20_tokens_data)
+  # erc20_tokens = list(map(lambda x: x["RowKey"], erc_20_tokens_data))
+  # list_pool_pairs = uniswap_obj.get_pair_pure_combinations(erc20_tokens)
+  # df_pools = uniswap_obj.get_metadata_pools(list_pool_pairs)
+  # print(df_pools)
+  # print(df_erc20_tokens)
+  # df_res = uniswap_obj.get_pair_name(df_pools, df_erc20_tokens)
+  # print(df_res)
+  # uniswap_factory = get_uniswap_factory(version)
+  # list_tokens = df_erc20_tokens['tokenAddress'].values
+  # list_pool_pairs = get_pair_pure_combinations(list_tokens)
+  # if len(list_pool_pairs) == 0: 
+  #     logging.info(f"Information about tokens UNISWAP V{version} already updated")
+  #     return
+  # df_pools = get_metadata_pools(uniswap_factory, list_pool_pairs)
+  # df_pair_pool = get_pair_name(df_pools, df_erc20_tokens)
